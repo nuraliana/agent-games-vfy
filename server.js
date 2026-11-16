@@ -41,6 +41,7 @@ const fs = require('fs');
 const path = require('path');
 
 const snarkjs = require('snarkjs');
+const { keccak_256 } = require('js-sha3');
 
 // ---------------------------------------------------------------- config
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -165,6 +166,28 @@ async function generateProof(turn, action) {
   return { proof, public_signals: publicSignals };
 }
 
+// publicInputsHash — REQUIRED by the platform (practice rejects the turn
+// without it). Exact definition from the official reference
+// (smilewithkhushi/steal-the-vfy-reference src/protocol.ts):
+// keccak256 over 8 uint256 ABI words (32-byte BE each), in /build order:
+// [commitment, matchId (UUID bytes), turn, selfBalance, opponentBalance,
+//  action enum (HOLD 0 / FORTIFY 1 / EXTRACT 2), amount, 1].
+// Note: these are the raw uint256 words, NOT field-reduced values.
+function publicInputsHash(turn, action) {
+  const words = [
+    BigInt(COMMITMENT_DEC),
+    BigInt('0x' + String(turn.matchId).replace(/-/g, '')),
+    BigInt(turn.turn),
+    toBigInt(turn.state.selfBalance),
+    toBigInt(turn.state.opponentBalance),
+    BigInt({ HOLD: 0, FORTIFY: 1, EXTRACT: 2 }[action.type]),
+    BigInt(action.type === 'EXTRACT' ? action.amount : 0),
+    1n,
+  ];
+  const buf = Buffer.concat(words.map((w) => Buffer.from(w.toString(16).padStart(64, '0'), 'hex')));
+  return '0x' + keccak_256(buf);
+}
+
 function withTimeout(promise, ms, label) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -283,7 +306,10 @@ async function handleTurn(req, res, rawBody) {
       const t0 = Date.now();
       const { proof, public_signals } = await withTimeout(
         generateProof(turn, action), proofBudget, 'proof generation');
-      response.policyProof = { circuitVersion: 'v1', proof, public_signals };
+      response.policyProof = {
+        circuitVersion: 'v1', proof, public_signals,
+        publicInputsHash: publicInputsHash(turn, action),
+      };
       console.log(`[vfy] ${key} ${action.type}${action.type === 'EXTRACT' ? ' ' + action.amount : ''} proof ok in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
     } catch (e) {
       // A missing proof scores -2 and the turn becomes HOLD; a timeout scores

@@ -91,6 +91,10 @@ function req(method, path, bodyObj, signIt = true) {
     const vk = require('./circuits/vk.json');
     const ok = await snarkjs.groth16.verify(vk, ps, rj.policyProof.proof);
     check('proof verifies locally', ok === true);
+    // publicInputsHash must match an independent keccak computation
+    // (Python pycryptodome, same words): this exact value pins the formula.
+    check('publicInputsHash matches reference keccak',
+      rj.policyProof.publicInputsHash === '0x325310dddd330f100711b166ad01128d7b6ee669270cb1a4de43ee64980f9d6b');
   }
 
   // 6. idempotency: same turn again -> same idempotencyKey + action
