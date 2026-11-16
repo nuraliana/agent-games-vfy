@@ -173,6 +173,24 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise.finally(() => clearTimeout(timer)), timeout]);
 }
 
+// Warm up the prover once at startup: a cold fullProve takes ~40s on
+// Railway (wasm compile), warm takes ~1.3s. Without this, the first real
+// turn after a deploy pays the cold cost and can miss a short deadline.
+// Runs in the background; the server already listens while it warms up.
+async function warmUpProver() {
+  if (!SALT_DEC || !COMMITMENT_DEC) return; // nothing valid to prove with
+  try {
+    const input = buildCircuitInput(
+      { matchId: '00000000-0000-0000-0000-000000000001', turn: 1,
+        state: { selfBalance: 100, opponentBalance: 100 } },
+      { type: 'EXTRACT', amount: 10 });
+    await snarkjs.groth16.fullProve(input, WASM_PATH, ZKEY_PATH);
+    console.log('[vfy] prover warmed up (cold fullProve done)');
+  } catch (e) {
+    console.warn('[vfy] prover warm-up failed (first turn will be slow):', e.message);
+  }
+}
+
 // ---------------------------------------------------------------- HTTP
 function sendJson(res, status, obj) {
   const body = Buffer.from(JSON.stringify(obj));
@@ -256,7 +274,10 @@ async function handleTurn(req, res, rawBody) {
     idempotencyKey: crypto.randomUUID(),
   };
   let proofBudget = PROOF_TIMEOUT_MS;
-  if (deadlineMs) proofBudget = Math.min(proofBudget, deadlineMs - Date.now() - 15000);
+  // 3s buffer: warm proofs take ~1.3s, so the response still returns well
+  // before the deadline. A 15s buffer skipped proof entirely on short
+  // practice deadlines (verified 17 Nov: practice turn skipped at 42ms).
+  if (deadlineMs) proofBudget = Math.min(proofBudget, deadlineMs - Date.now() - 3000);
   if (proofBudget > 0 && SALT_DEC && COMMITMENT_DEC) {
     try {
       const t0 = Date.now();
@@ -308,6 +329,7 @@ if (require.main === module) {
   server.listen(PORT, HOST, () => {
     console.log(`[vfy] listening on http://${HOST}:${PORT} (POST /agent, GET /health)`);
     console.log(`[vfy] hmac_configured=${Boolean(HMAC_SECRET)} strategy_configured=${Boolean(SALT_DEC && COMMITMENT_DEC)} params=${STRATEGY_PARAMS.join(',')}`);
+    warmUpProver();
   });
 }
 
