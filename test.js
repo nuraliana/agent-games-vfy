@@ -78,7 +78,7 @@ function req(method, path, bodyObj, signIt = true) {
   check('turn has policyProof v1', rj.policyProof && rj.policyProof.circuitVersion === 'v1' && rj.policyProof.proof && rj.policyProof.public_signals);
   check('turn has idempotencyKey', typeof rj.idempotencyKey === 'string' && rj.idempotencyKey.length > 10);
   check('idempotencyKey is deterministic sha256(matchId:turn)',
-    rj.idempotencyKey === '38c62bb8-13d3-bcde-92b7-4df8270de5b5');
+    rj.idempotencyKey === '38c62bb8-13d3-4cde-82b7-4df8270de5b5');
   check('turn response has protocolVersion v1', rj.protocolVersion === 'v1');
   check('response no-store (cache-control)', String(resp.headers['cache-control'] || '').includes('no-store'));
   check('response signed (x-agent-games-signature)', typeof resp.headers['x-agent-games-signature'] === 'string');

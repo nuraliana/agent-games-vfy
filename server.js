@@ -159,9 +159,12 @@ function buildCircuitInput(turn, action) {
 // Deterministic idempotency key: sha256("matchId:turn") rendered as a UUID.
 // Survives redeploys (Railway FS is ephemeral) — a retried turn always gets
 // the same key, matching pecker / the reference implementation.
+// CAREFUL: the platform validates the UUID strictly (zod: version 1-5,
+// variant 8/9/a/b), so the version/variant nibbles are FORCED to '4'/'8' —
+// raw sha256 hex fails validation (proven 17 Nov 01:08 WIB, "Invalid UUID").
 function deterministicKey(matchId, turn) {
   const h = crypto.createHash('sha256').update(`${matchId}:${turn}`).digest('hex');
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
 // Proof serialization: snarkjs fullProve is CPU-heavy; concurrent proofs
