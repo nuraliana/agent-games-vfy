@@ -156,6 +156,24 @@ function buildCircuitInput(turn, action) {
   };
 }
 
+// Deterministic idempotency key: sha256("matchId:turn") rendered as a UUID.
+// Survives redeploys (Railway FS is ephemeral) — a retried turn always gets
+// the same key, matching pecker / the reference implementation.
+function deterministicKey(matchId, turn) {
+  const h = crypto.createHash('sha256').update(`${matchId}:${turn}`).digest('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+// Proof serialization: snarkjs fullProve is CPU-heavy; concurrent proofs
+// (parallel matches) would thrash the single-core container and blow the
+// 60s deadline. Queue them instead of running in parallel.
+let proofQueue = Promise.resolve();
+function queuedProof(turn, action) {
+  const run = proofQueue.then(() => generateProof(turn, action));
+  proofQueue = run.catch(() => {}); // keep the queue alive after failures
+  return run;
+}
+
 async function generateProof(turn, action) {
   const circuitInput = buildCircuitInput(turn, action);
   const { proof, publicSignals } = await snarkjs.groth16.fullProve(circuitInput, WASM_PATH, ZKEY_PATH);
@@ -217,7 +235,7 @@ async function warmUpProver() {
 // ---------------------------------------------------------------- HTTP
 function sendJson(res, status, obj) {
   const body = Buffer.from(JSON.stringify(obj));
-  const headers = { 'content-type': 'application/json', 'content-length': body.length };
+  const headers = { 'content-type': 'application/json', 'content-length': body.length, 'cache-control': 'no-store' };
   if (HMAC_SECRET) headers['x-agent-games-signature'] = signBody(body);
   res.writeHead(status, headers);
   res.end(body);
@@ -267,16 +285,27 @@ async function handleTurn(req, res, rawBody) {
     return res.end(body);
   }
 
+  // Envelope-commitment check: the platform sends the commitment it has on
+  // file; if it differs from ours, log loudly (do NOT fail — the decision
+  // and proof still use OUR committed params, which is what the circuit
+  // expects; a mismatch means the platform has stale data).
+  const envCommit = String(turn.strategyCommitment && turn.strategyCommitment.hash || '').toLowerCase();
+  const ownCommit = '0x' + BigInt(COMMITMENT_DEC).toString(16).padStart(64, '0');
+  if (envCommit && envCommit !== ownCommit) {
+    console.warn(`[vfy] ${key}: ENVELOPE COMMITMENT MISMATCH (envelope ${envCommit} != ours ${ownCommit})`);
+  }
+
   // 4. Past-deadline turns fail closed as HOLD (no proof — the turn is lost
   // either way, but a late EXTRACT proof would be invalid anyway).
   const deadlineMs = turn.deadlineAt ? Date.parse(turn.deadlineAt) : 0;
   if (deadlineMs && Date.now() > deadlineMs) {
     console.warn(`[vfy] ${key}: past deadlineAt, fail closed (HOLD, no proof)`);
     const response = {
+      protocolVersion: 'v1',
       matchId: turn.matchId, turn: turn.turn,
       action: { type: 'HOLD' },
       agentTimestamp: new Date().toISOString(),
-      idempotencyKey: crypto.randomUUID(),
+      idempotencyKey: deterministicKey(turn.matchId, turn.turn),
     };
     decisionsByTurn[key] = response;
     saveJson(DECISIONS_PATH, decisionsByTurn);
@@ -290,11 +319,12 @@ async function handleTurn(req, res, rawBody) {
 
   // 6. Proof (bounded by the turn deadline minus a safety buffer).
   const response = {
+    protocolVersion: 'v1',
     matchId: turn.matchId,
     turn: turn.turn,
     action: action.type === 'EXTRACT' ? { type: 'EXTRACT', amount: action.amount } : { type: action.type },
     agentTimestamp: new Date().toISOString(),
-    idempotencyKey: crypto.randomUUID(),
+    idempotencyKey: deterministicKey(turn.matchId, turn.turn),
   };
   let proofBudget = PROOF_TIMEOUT_MS;
   // 3s buffer: warm proofs take ~1.3s, so the response still returns well
@@ -305,7 +335,7 @@ async function handleTurn(req, res, rawBody) {
     try {
       const t0 = Date.now();
       const { proof, public_signals } = await withTimeout(
-        generateProof(turn, action), proofBudget, 'proof generation');
+        queuedProof(turn, action), proofBudget, 'proof generation');
       response.policyProof = {
         circuitVersion: 'v1', proof, public_signals,
         publicInputsHash: publicInputsHash(turn, action),
